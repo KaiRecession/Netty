@@ -152,3 +152,13 @@ accept和read的函数不在阻塞，直接返回是否有数据。这样直接�
 处理完后取消key的可写事件，要不这个写事件会一直触发
 
 只要向 channel 发送数据时，socket 缓冲可写，这个事件会频繁触发，因此应当只在 socket 缓冲区写不下时再关注可写事件，数据写完之后再取消关注
+
+## 多线程优化
+
+定义boss线程，worker线程。每个线程都有自己内部的selector，boss线程的selector方法处理accept事件，剩下的时间都交给worker线程。由于selector不同，比如boss线程把读事件交给worker线程注册时，如果worker线程的selector正处于select方法阻塞，那就注册不上。因此，把boss线程搞成线程池一样，维护一个任务阻塞队列，把注册这件事情的代码放在队列里面，然后调用wakeup方法唤醒select阻塞，唤醒后就拿出队列里面的注册代码运行，然后再检查是不是有读写时间发生。
+
+# NIO与BIO
+
+### stream与channel
+
+stream 不会自动缓冲数据，channel 会利用系统提供的发送缓冲区、接收缓冲区（更为底层）。stream 仅支持阻塞 API，channel 同时支持阻塞、非阻塞 API，网络 channel 可配合 selector 实现多路复用二者均为全双工，即读写可以同时进行。
