@@ -143,7 +143,7 @@ accept和read的函数不在阻塞，直接返回是否有数据。这样直接�
 
 当使用split方法后，检查position是等于limit的，就证明这是个半包，就扩容
 
-# write事件
+## write事件
 
 **服务器向客户端写数据，基于TCP的控制。所以写入的数据不会一直写入，可能客户端处理数据较慢，这时候服务器写进去的字节数就是0，就有点像之前read的非阻塞的返回值，返回0就是事件没有发生。在客户端设置线程处理buffer的时候休眠一秒，服务端就会出现很多次写入0个字节。这可能就是阻塞控制吧，数据的传输速度不仅看服务端，还要看客户端被发送方的处理速度**
 
@@ -157,8 +157,159 @@ accept和read的函数不在阻塞，直接返回是否有数据。这样直接�
 
 定义boss线程，worker线程。每个线程都有自己内部的selector，boss线程的selector方法处理accept事件，剩下的时间都交给worker线程。由于selector不同，比如boss线程把读事件交给worker线程注册时，如果worker线程的selector正处于select方法阻塞，那就注册不上。因此，把boss线程搞成线程池一样，维护一个任务阻塞队列，把注册这件事情的代码放在队列里面，然后调用wakeup方法唤醒select阻塞，唤醒后就拿出队列里面的注册代码运行，然后再检查是不是有读写时间发生。
 
-# NIO与BIO
+## NIO与BIO
 
 ### stream与channel
 
 stream 不会自动缓冲数据，channel 会利用系统提供的发送缓冲区、接收缓冲区（更为底层）。stream 仅支持阻塞 API，channel 同时支持阻塞、非阻塞 API，网络 channel 可配合 selector 实现多路复用二者均为全双工，即读写可以同时进行。
+
+# Netty
+
+依赖导入
+
+```java
+<dependency>
+    <groupId>io.netty</groupId>
+    <artifactId>netty-all</artifactId>
+    <version>4.1.39.Final</version>
+</dependency>
+```
+
+## 组件
+
+#### EventLoop
+
+EventLoop 本质是一个单线程执行器（同时维护了一个 Selector），里面有 run 方法处理 Channel 上源源不断的 io 事件。
+
+它的继承关系比较复杂
+
+* 一条线是继承自 j.u.c.ScheduledExecutorService 因此包含了线程池中所有的方法
+* 另一条线是继承自 netty 自己的 OrderedEventExecutor，
+  * 提供了 boolean inEventLoop(Thread thread) 方法判断一个线程是否属于此 EventLoop
+  * 提供了 parent 方法来看看自己属于哪个 EventLoopGroup
+
+#### EventLoopGroup
+
+EventLoopGroup 是一组 EventLoop，Channel 一般会调用 EventLoopGroup 的 register 方法来绑定其中一个 EventLoop，后续这个 Channel 上的 io 事件都由此 EventLoop 来处理（保证了 io 事件处理时的线程安全）
+
+* 继承自 netty 自己的 EventExecutorGroup
+  * 实现了 Iterable 接口提供遍历 EventLoop 的能力
+  * 另有 next 方法获取集合中下一个 EventLoop
+
+关闭方法：
+
+优雅关闭 `shutdownGracefully` 方法。该方法会首先切换 `EventLoopGroup` 到关闭状态从而拒绝新的任务的加入，然后在任务队列的任务都处理完成后，停止线程的运行。从而确保整体应用是在正常有序的状态下退出的
+
+工人与 channel 之间进行了绑定：
+
+<img src="assets/%E6%88%AA%E5%B1%8F2022-12-23%2015.01.38.png" alt="截屏2022-12-23 15.01.38" style="zoom:50%;" />
+
+#### DefaultEventLoopGroup
+
+本来EventLoop是一个线程按照流水线执行任务，但是流水线的其中一个环节可以换线程池DefaultEventLoop，这样这个环节就可以多个线程池操作，处理IO事件的线程就可以空闲出来。同时处理时间的线程池也会按照轮询并且一个channel绑定一个线程的原则
+
+<img src="assets/%E6%88%AA%E5%B1%8F2022-12-23%2019.33.37.png" alt="截屏2022-12-23 19.33.37" style="zoom:50%;" />
+
+执行换线程的源码
+
+```java
+static void invokeChannelRead(final AbstractChannelHandlerContext next, Object msg) {
+    final Object m = next.pipeline.touch(ObjectUtil.checkNotNull(msg, "msg"), next);
+    // 下一个 handler 的事件循环是否与当前的事件循环是同一个线程
+    EventExecutor executor = next.executor();
+    
+    // 是，直接调用
+    if (executor.inEventLoop()) {
+        next.invokeChannelRead(m);
+    } 
+    // 不是，将要执行的代码作为任务提交给下一个事件循环处理（换人）
+    else {
+        executor.execute(new Runnable() {
+            @Override
+            public void run() {
+                next.invokeChannelRead(m);
+            }
+        });
+    }
+}
+```
+
+#### Channel
+
+closeFuture() 用来处理 channel 的关闭
+
+* sync 方法作用是同步等待 channel 关闭
+* 而 addListener 方法是异步等待 channel 关闭
+
+connect方法返回的是 ChannelFuture 对象，它的作用是利用 channel() 方法来获取 Channel 对象。但是获取Channel对象之前要等Future返回结果，即等待连接建立完毕。**connect 方法是异步的，意味着不等连接建立，方法执行就返回了。因此 channelFuture 对象中不能【立刻】获得到正确的 Channel 对象**
+
+除了用 sync 方法可以让异步操作同步以外，还可以使用回调的方式。使用Future中的addListener方法。不同的是，回调方法最终执行的线程是Netty内部的线程，sync方法后面执行的就是本线程。
+
+channel.closeFuture();获取关闭Future对象，也有两种方法
+
+#### 异步的好处
+
+<img src="assets/%E6%88%AA%E5%B1%8F2022-12-24%2009.13.46.png" alt="截屏2022-12-24 09.13.46" style="zoom:50%;" />
+
+四个医生，每个病人看病需要20分钟，每个医生一小时看3个病人，总共12个病人
+
+<img src="assets/%E6%88%AA%E5%B1%8F2022-12-24%2009.16.06.png" alt="截屏2022-12-24 09.16.06" style="zoom:50%;" />
+
+在一小时内还是能看12个病人，但是如果范围变成10分钟的话，这边20分钟内，在包括在处理和已经处理的就有12个，那边就只有三个，这边的**吞吐量就翻了四倍**。但是**每一个病人的总处理时间没有变短**，甚至可能变长。但是但从吞吐量来说是提高了的
+
+#### Future & Promise
+
+<img src="assets/%E6%88%AA%E5%B1%8F2022-12-24%2009.26.01.png" alt="截屏2022-12-24 09.26.01"  />
+
+#### Handler & Pipeline
+
+ChannelHandler 用来处理 Channel 上的各种事件，分为入站、出站两种。所有 ChannelHandler 被连成一串，就是 Pipeline
+
+* 入站处理器通常是 ChannelInboundHandlerAdapter 的子类，主要用来读取客户端数据，写回结果
+* 出站处理器通常是 ChannelOutboundHandlerAdapter 的子类，主要对写回结果进行加工
+
+打个比喻，每个 Channel 是一个产品的加工车间，Pipeline 是车间中的流水线，ChannelHandler 就是流水线上的各道工序，而后面要讲的 ByteBuf 是原材料，经过很多工序的加工：先经过一道道入站工序，再经过一道道出站工序最终变成产品
+
+<img src="assets/%E6%88%AA%E5%B1%8F2022-12-24%2009.49.41.png" alt="截屏2022-12-24 09.49.41" style="zoom:50%;" />
+
+ctx.channel().write(msg) 从尾部开始查找出站处理器，最后一个出站处理器写这句话还能造成死循环
+
+ctx.write(msg) 是从当前节点找上一个出站处理器
+
+ctx.fireChannelRead(msg) 是 **调用下一个入站处理器**
+
+#### ByteBuf
+
+* 直接内存创建和销毁的代价昂贵，但读写性能高（少一次内存复制），适合配合池化功能一起用
+* 直接内存对 GC 压力小，因为这部分内存不受 JVM 垃圾回收的管理，但也要注意及时主动释放
+
+池化的最大意义在于可以重用 ByteBuf，优点有
+
+* 没有池化，则每次都得创建新的 ByteBuf 实例，这个操作对直接内存代价昂贵，就算是堆内存，也会增加 GC 压力
+* 有了池化，则可以重用池中 ByteBuf 实例，并且采用了与 jemalloc 类似的内存分配算法提升分配效率
+* 高并发时，池化功能更节约内存，减少内存溢出的可能
+
+<img src="assets/%E6%88%AA%E5%B1%8F2022-12-24%2010.51.10.png" alt="截屏2022-12-24 10.51.10" style="zoom:50%;" />
+
+这不比ByteBuffer好使
+
+扩容规则是
+
+* 如何写入后数据大小未超过 512，则选择下一个 16 的整数倍，例如写入后大小为 12 ，则扩容后 capacity 是 16
+* 如果写入后数据大小超过 512，则选择下一个 2^n，例如写入后大小为 513，则扩容后 capacity 是 2^10=1024（2^9=512 已经不够了）
+* 扩容不能超过 max capacity 会报错
+
+Netty 这里采用了引用计数法来控制回收内存，每个 ByteBuf 都实现了 ReferenceCounted 接口
+
+* 每个 ByteBuf 对象的初始计数为 1
+* 调用 release 方法计数减 1，如果计数为 0，ByteBuf 内存被回收
+* 调用 retain 方法计数加 1，表示调用者没用完之前，其它 handler 即使调用了 release 也不会造成回收
+* 当计数为 0 时，底层内存会被回收，这时即使 ByteBuf 对象还在，其各个方法均无法正常使用
+
+【零拷贝】的体现之一，对原始 ByteBuf 进行切片成多个 ByteBuf，切片后的 ByteBuf 并没有发生内存复制，还是使用原始 ByteBuf 的内存，切片后的 ByteBuf 维护独立的 read，write 指针
+
+我最初在认识上有这样的误区，认为只有在 netty，nio 这样的多路复用 IO 模型时，读写才不会相互阻塞，才可以实现高效的双向通信，但实际上，Java Socket 是全双工的：在任意时刻，线路上存在`A 到 B` 和 `B 到 A` 的双向信号传输。即使是阻塞 IO，**读和写是可以同时进行的，只要分别采用读线程和写线程即可**，读不会阻塞写、写也不会阻塞读
+
+## 粘包和半包的解决
+
+<img src="assets/%E6%88%AA%E5%B1%8F2022-12-26%2018.08.27.png" alt="截屏2022-12-26 18.08.27" style="zoom:50%;" />
