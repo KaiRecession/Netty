@@ -313,3 +313,131 @@ Netty 这里采用了引用计数法来控制回收内存，每个 ByteBuf 都�
 ## 粘包和半包的解决
 
 <img src="assets/%E6%88%AA%E5%B1%8F2022-12-26%2018.08.27.png" alt="截屏2022-12-26 18.08.27" style="zoom:50%;" />
+
+```java
+ch.pipeline().addLast(new FixedLengthFrameDecoder(8)); // 固定长度
+ch.pipeline().addLast(new LineBasedFrameDecoder(1024)); // 固定分隔符，当1024个字节还没出现分隔符就报错
+```
+
+这行代码放在pipline的第一个环节，是一个Decoder。当客户端传来的消息没有满足一帧的条件时，pipline不会往下走。当满足条件时把传来的消息打包成rebuf对象，剩下的处理流程就和之前的一致了
+
+下面这个就很像学四层网络模型时每一层的数据帧结构了
+
+```java
+// 最大长度，长度偏移，长度占用字节，长度调整，剥离字节数
+ch.pipeline().addLast(new LengthFieldBasedFrameDecoder(1024, 0, 1, 0, 1));
+```
+
+![截屏2022-12-29 10.42.43](assets/%E6%88%AA%E5%B1%8F2022-12-29%2010.42.43.png)
+
+按照图翻译就是：最大长度，header1的长度，Length的长度，header2的长度，传递下一环节需不需要去掉几个字节（自己定义，可以去掉header1或者不是内容的都去掉，所以建议内容就放到帧的最后一部分）
+
+**分清楚客户端是按照字节数填充这一帧的内容，服务端才是设计长度。同时length的长度如果是大于一个字节就要考虑位移二进制位数去填充长度这一部分**
+
+### 自定义协议
+
+* 魔数，用来在第一时间判定是否是无效数据包
+* 版本号，可以支持协议的升级
+* 序列化算法，消息正文到底采用哪种序列化反序列化方式，可以由此扩展，例如：json、protobuf、hessian、jdk
+* 指令类型，是登录、注册、单聊、群聊... 跟业务相关
+* 请求序号，为了双工通信，提供异步能力
+* 正文长度
+* 消息正文
+
+自定义协议的类继承ByteToMessageCodec，只需要重写encode和decode就行，即设置了入站第一个完成解码，也设置了出站最后一个编码，这可能也是为什么出站要反着来的原因吧。
+
+同时上面使用的 LengthFieldBasedFrameDecoder等类也都是重写了ByteToMessageCodec里面的方法
+
+```java
+@Slf4j
+public class MessageCodec extends ByteToMessageCodec<Message> {
+
+    @Override
+    protected void encode(ChannelHandlerContext ctx, Message msg, ByteBuf out) throws Exception {
+        // 1. 4 字节的魔数
+        out.writeBytes(new byte[]{1, 2, 3, 4});
+        // 2. 1 字节的版本,
+        out.writeByte(1);
+        // 3. 1 字节的序列化方式 jdk 0 , json 1
+        out.writeByte(0);
+        // 4. 1 字节的指令类型
+        out.writeByte(msg.getMessageType());
+        // 5. 4 个字节
+        out.writeInt(msg.getSequenceId());
+        // 无意义，对齐填充
+        out.writeByte(0xff);
+        // 6. 获取内容的字节数组
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        ObjectOutputStream oos = new ObjectOutputStream(bos);
+        oos.writeObject(msg);
+        byte[] bytes = bos.toByteArray();
+        // 7. 长度
+        out.writeInt(bytes.length);
+        // 8. 写入内容
+        out.writeBytes(bytes);
+    }
+
+    @Override
+    protected void decode(ChannelHandlerContext ctx, ByteBuf in, List<Object> out) throws Exception {
+        int magicNum = in.readInt();
+        byte version = in.readByte();
+        byte serializerType = in.readByte();
+        byte messageType = in.readByte();
+        int sequenceId = in.readInt();
+        in.readByte();
+        int length = in.readInt();
+        byte[] bytes = new byte[length];
+        in.readBytes(bytes, 0, length);
+        ObjectInputStream ois = new ObjectInputStream(new ByteArrayInputStream(bytes));
+        Message message = (Message) ois.readObject();
+        log.debug("{}, {}, {}, {}, {}, {}", magicNum, version, serializerType, messageType, sequenceId, length);
+        log.debug("{}", message);
+        out.add(message);
+    }
+}
+```
+
+### 客户端假死问题的解决
+
+1、**客户端定时发送心跳消息**。客户端可以定时向服务器端发送数据，只要这个时间间隔小于服务器定义的空闲检测的时间间隔，那么就能防止前面提到的误判，客户端可以定义如下心跳处理器
+
+```java
+// 用来判断是不是 读空闲时间过长，或 写空闲时间过长
+// 3s 内如果没有向服务器写数据，会触发一个 IdleState#WRITER_IDLE 事件
+ch.pipeline().addLast(new IdleStateHandler(0, 3, 0));
+// ChannelDuplexHandler 可以同时作为入站和出站处理器
+ch.pipeline().addLast(new ChannelDuplexHandler() {
+    // 用来触发特殊事件
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception{
+        IdleStateEvent event = (IdleStateEvent) evt;
+        // 触发了写空闲事件
+        if (event.state() == IdleState.WRITER_IDLE) {
+            //                                log.debug("3s 没有写数据了，发送一个心跳包");
+            ctx.writeAndFlush(new PingMessage());
+        }
+    }
+});
+```
+
+2、服务端每隔一段时间就检查这段时间内是否接收到客户端数据，没有就可以判定为连接假死
+
+```java
+// 用来判断是不是 读空闲时间过长，或 写空闲时间过长
+// 5s 内如果没有收到 channel 的数据，会触发一个 IdleState#READER_IDLE 事件
+ch.pipeline().addLast(new IdleStateHandler(5, 0, 0));
+// ChannelDuplexHandler 可以同时作为入站和出站处理器
+ch.pipeline().addLast(new ChannelDuplexHandler() {
+    // 用来触发特殊事件
+    @Override
+    public void userEventTriggered(ChannelHandlerContext ctx, Object evt) throws Exception{
+        IdleStateEvent event = (IdleStateEvent) evt;
+        // 触发了读空闲事件
+        if (event.state() == IdleState.READER_IDLE) {
+            log.debug("已经 5s 没有读到数据了");
+            ctx.channel().close();
+        }
+    }
+});
+```
+
