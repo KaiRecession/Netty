@@ -3,6 +3,7 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.string.StringEncoder;
@@ -14,6 +15,8 @@ public class NettyClientDemo02 {
     public static void main(String[] args) throws InterruptedException {
         Channel channel = new Bootstrap()
                 .group(new NioEventLoopGroup())
+                // 如果本身服务器就连不上，不用等3s，直接就返回refused的异常了
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 3000)
                 .channel(NioSocketChannel.class)
                 .handler(new ChannelInitializer<Channel>() {
                     @Override

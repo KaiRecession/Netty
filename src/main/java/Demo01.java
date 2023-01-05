@@ -11,6 +11,7 @@ import java.nio.channels.FileChannel;
 public class Demo01 {
     public static void main(String[] args) {
         try (RandomAccessFile file = new RandomAccessFile("data", "rw")) {
+
             FileChannel channel = file.getChannel();
             ByteBuffer buffer = ByteBuffer.allocate(10);
             while (true) {
