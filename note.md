@@ -514,3 +514,43 @@ jdk的动态代理通过反射实现所有的接口，implement所有接口并�
 ## cglib动态代理
 
 原理是对指定的目标类生成一个子类，并覆盖其中方法实现增强，但因为采用的是继承，所以不能对final修饰的类进行代理。 **JDK的动态代理机制只能代理实现了接口的类，而不能实现接口的类就不能实现JDK的动态代理。**
+
+# Netty源码解读
+
+1、debug方式，进入bind方法
+
+<img src="assets/%E6%88%AA%E5%B1%8F2023-01-06%2013.29.31.png" alt="截屏2023-01-06 13.29.31" style="zoom:50%;" />
+
+<img src="assets/%E6%88%AA%E5%B1%8F2023-01-06%2013.30.23.png" alt="截屏2023-01-06 13.30.23" style="zoom:50%;" />
+
+2、commad键再进入这个bind方法
+
+<img src="assets/%E6%88%AA%E5%B1%8F2023-01-06%2013.31.27.png" alt="截屏2023-01-06 13.31.27" style="zoom:50%;" />
+
+3、进入dobind方法，给一下方法加上断点
+
+<img src="assets/%E6%88%AA%E5%B1%8F2023-01-06%2014.12.40.png" alt="截屏2023-01-06 14.12.40" style="zoom:50%;" />
+
+initAndRegister（**init创建ssc，Register将ssc注册到selector**）会给nio线程，返回一个Future对象。如果future很快执行完就是跑到第一个doBind0，此时就是主线程。否则就跑到回调函数那里，由nio线程执行。**doBind0就是讲端口绑定**
+
+4、进入initAndRegister方法查看
+
+<img src="assets/%E6%88%AA%E5%B1%8F2023-01-06%2014.25.53.png" alt="截屏2023-01-06 14.25.53" style="zoom:50%;" />
+
+channelFactory.newChannel就是通过反射创建Niossc对象，Niossc对象是对java里面的ssc对象的增强。进入init方法，到P.addlast，p就是pipeline，初始化handler等待调用
+
+<img src="assets/%E6%88%AA%E5%B1%8F2023-01-06%2015.24.21.png" alt="截屏2023-01-06 15.24.21" style="zoom:50%;" />
+
+进入initAndRegister方法下面的register方法，一直进入register直到下面
+
+<img src="assets/%E6%88%AA%E5%B1%8F2023-01-06%2015.29.27.png" alt="截屏2023-01-06 15.29.27" style="zoom:50%;" />
+
+切换线程，eventLoop.inEventLoop()判断当前线程是否是nio线程，所以一定会进入else分支，切换线程提交nio线程池任务。一定会是nio线程执行注册。进入register0
+
+<img src="assets/%E6%88%AA%E5%B1%8F2023-01-06%2015.32.59.png" alt="截屏2023-01-06 15.32.59" style="zoom:50%;" />
+
+进入doRegister()方法<img src="assets/%E6%88%AA%E5%B1%8F2023-01-06%2015.35.01.png" alt="截屏2023-01-06 15.35.01" style="zoom:50%;" />
+
+javaChannel就是ssc原生的，将niossc作为附件，开始什么事件都不关注。有事件的话就给附件niossc处理。执行完后，register()方法中的invokeHandlerAddedIfNeeded就会执行初始化的handler，初始化handler中会添加acceptor处理accept事件
+
+**处理器不就相当于之前的原始写法里面的读事件、写事件的封装！！**
