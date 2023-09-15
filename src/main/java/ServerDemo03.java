@@ -43,7 +43,7 @@ public class ServerDemo03 {
                         SocketChannel sc = (SocketChannel) key.channel();
                         ByteBuffer attachment = (ByteBuffer) key.attachment();
                         int read = sc.read(attachment);
-                        System.out.println(read);
+                        System.out.println("读取的字节数：" + read);
                         if (read == -1) {
                             key.cancel();
                             sc.close();

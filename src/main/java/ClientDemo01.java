@@ -9,8 +9,8 @@ public class ClientDemo01 {
         sc.connect(new InetSocketAddress("localhost", 8080));
         System.out.println("waiting");
         sc.write(StandardCharsets.UTF_8.encode("Hello"));
-        Thread.sleep(5000);
-        sc.write(StandardCharsets.UTF_8.encode("Hello"));
+//        Thread.sleep(5000);
+//        sc.write(StandardCharsets.UTF_8.encode("Hello"));
         Thread.sleep(100000);
     }
 }

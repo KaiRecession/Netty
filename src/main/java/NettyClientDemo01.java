@@ -41,6 +41,6 @@ public class NettyClientDemo01 {
                 .connect("127.0.0.1", 8080)
                 .sync()
                 .channel()
-                .writeAndFlush("张三");
+                ;
     }
 }
